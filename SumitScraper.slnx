@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SumitScraper/SumitScraper.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SumitScraper.Tests/SumitScraper.Tests.csproj" />
+  </Folder>
+</Solution>

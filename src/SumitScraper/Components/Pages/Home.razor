@@ -1,0 +1,487 @@
+@page "/"
+@implements IAsyncDisposable
+@inject TransactionSyncService SyncService
+@inject ITransactionRepository TransactionRepository
+@inject ILogger<Home> Logger
+
+<div class="layout-shell">
+    <header class="topbar-card">
+        <div class="brand-lockup">
+            <div class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+                    <line x1="2.5" y1="10" x2="21.5" y2="10" />
+                    <line x1="6.5" y1="14.5" x2="11.5" y2="14.5" />
+                </svg>
+            </div>
+            <div>
+                <h1>Sumit Scraper</h1>
+                <p class="brand-caption">Visa Cal Statement Ledger</p>
+            </div>
+        </div>
+
+        <div class="toolbar-controls">
+            <div class="period-field">
+                <label for="billing-period-select">Period</label>
+                <div class="select-wrap">
+                    <select id="billing-period-select"
+                            name="period"
+                            class="period-select"
+                            @bind="_selectedPeriodKey"
+                            @bind:after="OnPeriodSelectionChanged"
+                            disabled="@_isCollecting">
+                        @foreach (var option in _availablePeriods)
+                        {
+                            var key = option.Period.ToYearMonthString();
+                            <option @key="key" value="@key">@option.Label · @key</option>
+                        }
+                        <option value="@AllPeriodsKey">Last 90 Days · All</option>
+                    </select>
+                    <svg class="select-arrow" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button type="button"
+                        class="btn btn-primary"
+                        @onclick="CollectTransactionsAsync"
+                        disabled="@_isCollecting">
+                    @if (_isCollecting)
+                    {
+                        <progress aria-label="Collecting statement" class="loading-spinner spinner-inline"></progress>
+                        <span>Collecting…</span>
+                    }
+                    else
+                    {
+                        <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3.5 10a6.5 6.5 0 0 1 11.1-4.6L16.5 7.2" />
+                            <polyline points="16.5 3.5 16.5 7.2 12.8 7.2" />
+                            <path d="M16.5 10a6.5 6.5 0 0 1-11.1 4.6L3.5 12.8" />
+                            <polyline points="3.5 16.5 3.5 12.8 7.2 12.8" />
+                        </svg>
+                        <span>Collect Statement</span>
+                    }
+                </button>
+
+                @if (_isCollecting)
+                {
+                    <button type="button"
+                            class="btn btn-secondary"
+                            @onclick="CancelCollection">
+                        Cancel
+                    </button>
+                }
+            </div>
+        </div>
+    </header>
+
+    <main id="main-content" class="ledger-main">
+        @if (_currentPhase is { } activePhase)
+        {
+            <div class="status-card @GetPhaseToneClass(activePhase)" role="status">
+                <div class="status-badge">
+                    @if (activePhase == CollectionPhase.Completed)
+                    {
+                        <svg class="status-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd" />
+                        </svg>
+                    }
+                    else if (activePhase == CollectionPhase.WaitingForUserLogin)
+                    {
+                        <svg class="status-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd" d="M10 2a4 4 0 00-4 4v2H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-1V6a4 4 0 00-4-4zm-2.5 6V6a2.5 2.5 0 015 0v2h-5z" clip-rule="evenodd" />
+                        </svg>
+                    }
+                    else
+                    {
+                        <progress aria-label="Step in progress" class="loading-spinner spinner-status"></progress>
+                    }
+                </div>
+                <div class="status-copy">
+                    <strong class="status-step">@GetPhaseStepLabel(activePhase)</strong>
+                    <span>@DescribePhase(activePhase)</span>
+                </div>
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(_errorBanner))
+        {
+            <div class="status-card tone-error" role="alert">
+                <div class="status-badge">
+                    <svg class="status-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <div class="status-copy">
+                    <span>@_errorBanner</span>
+                </div>
+            </div>
+        }
+
+        @if (_isInitialLoading)
+        {
+            <section class="empty-card">
+                <div class="empty-badge">
+                    <progress aria-label="Loading saved statement" class="loading-spinner"></progress>
+                </div>
+                <h2>Loading saved transactions</h2>
+                <p>Reading masked records from local JSON storage.</p>
+            </section>
+        }
+        else if (_allTransactions.Count == 0)
+        {
+            <section class="empty-card">
+                <div class="empty-badge" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="8" y1="13" x2="16" y2="13" />
+                        <line x1="8" y1="17" x2="13" y2="17" />
+                    </svg>
+                </div>
+                <h2>No saved statement yet</h2>
+                <p>Collect once to mask and save your 90-day Visa Cal statement locally, then switch between months instantly.</p>
+                <ol class="setup-steps" role="list">
+                    <li>
+                        <span class="step-num" aria-hidden="true">1</span>
+                        <div><strong>Open popup</strong><span>Click Collect Statement above</span></div>
+                    </li>
+                    <li>
+                        <span class="step-num" aria-hidden="true">2</span>
+                        <div><strong>Sign in on Visa Cal</strong><span>Complete SMS OTP in the browser</span></div>
+                    </li>
+                    <li>
+                        <span class="step-num" aria-hidden="true">3</span>
+                        <div><strong>Browse locally</strong><span>Masked JSON saved on your machine</span></div>
+                    </li>
+                </ol>
+            </section>
+        }
+        else if (_displayedTransactions.Count == 0)
+        {
+            <section class="empty-card">
+                <div class="empty-badge" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="7.5" />
+                        <line x1="20" y1="20" x2="16.35" y2="16.35" />
+                    </svg>
+                </div>
+                <h2>No transactions in @GetSelectedPeriodTitle()</h2>
+                <p>@_allTransactions.Count masked transactions are saved in other months. Switch Period to <strong>Last 90 Days · All</strong> or click <strong>Collect Statement</strong> to refresh.</p>
+            </section>
+        }
+        else
+        {
+            <section class="ledger-card">
+                <div class="ledger-header">
+                    <div class="ledger-title-group">
+                        <h2>@GetSelectedPeriodTitle()</h2>
+                        <span class="count-chip" dir="ltr">@_displayedTransactions.Count @(_displayedTransactions.Count == 1 ? "row" : "rows")</span>
+                    </div>
+                    <div class="ledger-summary" dir="ltr">
+                        <span class="summary-label">Net total</span>
+                        <strong class="summary-amount">@FormatChargesSummary()</strong>
+                    </div>
+                </div>
+
+                <div tabindex="0" role="region" aria-labelledby="statement-caption" class="table-wrapper">
+                    <table class="ledger-table">
+                        <caption id="statement-caption" class="visually-hidden">Saved statement transactions for @GetSelectedPeriodTitle()</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col" class="col-date">Date</th>
+                                <th scope="col" class="col-description">Masked Description</th>
+                                <th scope="col" class="col-amount">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @for (var index = 0; index < _displayedTransactions.Count; index++)
+                            {
+                                var item = _displayedTransactions[index];
+                                var isCredit = item.Amount >= 0m;
+                                <tr @key="(index, item.Date, item.Amount, item.Description)">
+                                    <td class="cell-date" dir="ltr">@item.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)</td>
+                                    <td class="cell-description"><bdi>@item.Description</bdi></td>
+                                    <td class="cell-amount" dir="ltr">
+                                        <span class="amount-value @(isCredit ? "is-credit" : "is-debit")">@(isCredit ? "+" : "")@item.Amount.ToString("N2", CultureInfo.InvariantCulture)</span>
+                                        <span class="amount-currency">@item.Currency</span>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    </main>
+
+    <footer class="ledger-footer">
+        <span class="privacy-note">
+            <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M10 1.944A11.954 11.954 0 012.166 5C2.056 5.649 2 6.319 2 7c0 5.225 3.34 9.67 8 11.317C14.66 16.67 18 12.225 18 7c0-.682-.057-1.35-.166-2.001A11.954 11.954 0 0110 1.944zM13.707 8.707a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+            </svg>
+            <span>Zero credentials stored · Masked in memory · @_allTransactions.Count saved</span>
+        </span>
+
+        <div class="storage-inline">
+            <span class="storage-label">JSON</span>
+            <code class="path-code" dir="ltr">@_storagePath</code>
+        </div>
+    </footer>
+</div>
+
+@code {
+    private const string AllPeriodsKey = "all";
+
+    private IReadOnlyList<(string Label, BillingPeriod Period)> _availablePeriods = [];
+    private IReadOnlyList<TransactionItem> _allTransactions = [];
+    private IReadOnlyList<TransactionItem> _displayedTransactions = [];
+    private string _selectedPeriodKey = string.Empty;
+    private string _storagePath = string.Empty;
+    private string? _errorBanner;
+    private CollectionPhase? _currentPhase;
+    private CancellationTokenSource? _runCts;
+    private bool _isInitialLoading = true;
+    private bool _isCollecting;
+    private bool _disposed;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _availablePeriods = SyncService.GetAvailablePeriods();
+        if (_availablePeriods.Count > 0)
+        {
+            _selectedPeriodKey = _availablePeriods[0].Period.ToYearMonthString();
+        }
+
+        _storagePath = TransactionRepository.FilePath;
+
+        try
+        {
+            _allTransactions = await TransactionRepository.GetSavedAsync();
+            ApplyPeriodFilter();
+        }
+        catch (Exception)
+        {
+            _errorBanner = "Unable to read saved transactions file.";
+        }
+        finally
+        {
+            _isInitialLoading = false;
+        }
+    }
+
+    private void OnPeriodSelectionChanged()
+    {
+        _errorBanner = null;
+        ApplyPeriodFilter();
+    }
+
+    private void ApplyPeriodFilter()
+    {
+        if (_allTransactions.Count == 0)
+        {
+            _displayedTransactions = Array.Empty<TransactionItem>();
+            return;
+        }
+
+        if (string.Equals(_selectedPeriodKey, AllPeriodsKey, StringComparison.OrdinalIgnoreCase))
+        {
+            _displayedTransactions = _allTransactions;
+            return;
+        }
+
+        try
+        {
+            var period = BillingPeriod.ParseYearMonth(_selectedPeriodKey);
+            _displayedTransactions = _allTransactions
+                .Where(item => period.Contains(item.Date))
+                .ToArray();
+        }
+        catch (FormatException)
+        {
+            _displayedTransactions = _allTransactions;
+        }
+    }
+
+    private BillingPeriod ResolveTargetCollectionPeriod()
+    {
+        if (!string.Equals(_selectedPeriodKey, AllPeriodsKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return BillingPeriod.ParseYearMonth(_selectedPeriodKey);
+        }
+
+        return _availablePeriods.Count > 0
+            ? _availablePeriods[0].Period
+            : new BillingPeriod(DateTimeOffset.Now.Year, DateTimeOffset.Now.Month);
+    }
+
+    private string GetSelectedPeriodTitle()
+    {
+        if (string.Equals(_selectedPeriodKey, AllPeriodsKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return "Last 90 Days";
+        }
+
+        foreach (var option in _availablePeriods)
+        {
+            var key = option.Period.ToYearMonthString();
+            if (string.Equals(key, _selectedPeriodKey, StringComparison.Ordinal))
+            {
+                return $"{option.Label} · {key}";
+            }
+        }
+
+        return _selectedPeriodKey;
+    }
+
+    private string FormatChargesSummary()
+    {
+        var totalsByCurrency = _displayedTransactions
+            .GroupBy(static item => string.IsNullOrWhiteSpace(item.Currency) ? "ILS" : item.Currency)
+            .Select(static group =>
+            {
+                var net = group.Sum(static item => item.Amount);
+                var sign = net > 0m ? "+" : string.Empty;
+                return $"{sign}{net.ToString("N2", CultureInfo.InvariantCulture)} {group.Key}";
+            });
+
+        return string.Join(" · ", totalsByCurrency);
+    }
+
+    private async Task CollectTransactionsAsync()
+    {
+        if (_isCollecting)
+        {
+            return;
+        }
+
+        BillingPeriod targetPeriod;
+        try
+        {
+            targetPeriod = ResolveTargetCollectionPeriod();
+        }
+        catch (FormatException)
+        {
+            _errorBanner = "Invalid statement month selected.";
+            return;
+        }
+
+        _errorBanner = null;
+        _isCollecting = true;
+        _currentPhase = CollectionPhase.LaunchingBrowser;
+
+        using var cts = new CancellationTokenSource();
+        _runCts = cts;
+        var progress = new Progress<CollectionPhase>(HandlePhaseChanged);
+
+        try
+        {
+            await SyncService.RunAsync(targetPeriod, progress, cts.Token);
+            _allTransactions = await TransactionRepository.GetSavedAsync(cts.Token);
+            ApplyPeriodFilter();
+            _currentPhase = CollectionPhase.Completed;
+        }
+        catch (Exception ex)
+        {
+            _currentPhase = null;
+            _errorBanner = MapErrorBanner(ex);
+        }
+        finally
+        {
+            if (ReferenceEquals(_runCts, cts))
+            {
+                _runCts = null;
+            }
+
+            _isCollecting = false;
+            StateHasChanged();
+        }
+    }
+
+    private void CancelCollection()
+    {
+        TryCancelRun();
+    }
+
+    private async void HandlePhaseChanged(CollectionPhase phase)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await InvokeAsync(() =>
+            {
+                if (!_disposed && _isCollecting)
+                {
+                    _currentPhase = phase;
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            await DispatchExceptionAsync(ex);
+        }
+    }
+
+    private void TryCancelRun()
+    {
+        try
+        {
+            _runCts?.Cancel();
+        }
+        catch (ObjectDisposedException ex)
+        {
+            Logger.LogDebug("Cancellation source already disposed ({ExceptionType}).", ex.GetType().Name);
+        }
+    }
+
+    private static string GetPhaseToneClass(CollectionPhase phase) => phase switch
+    {
+        CollectionPhase.WaitingForUserLogin => "tone-action",
+        CollectionPhase.Completed => "tone-success",
+        _ => "tone-info"
+    };
+
+    private static string GetPhaseStepLabel(CollectionPhase phase) => phase switch
+    {
+        CollectionPhase.LaunchingBrowser => "Step 1 of 4",
+        CollectionPhase.WaitingForUserLogin => "Step 2 of 4",
+        CollectionPhase.LoadingStatement => "Step 3 of 4",
+        CollectionPhase.ProcessingAndSaving => "Step 4 of 4",
+        CollectionPhase.Completed => "Completed",
+        _ => string.Empty
+    };
+
+    private static string DescribePhase(CollectionPhase phase) => phase switch
+    {
+        CollectionPhase.LaunchingBrowser => "Opening Visa Cal browser window…",
+        CollectionPhase.WaitingForUserLogin => "Sign in and enter your SMS code in the opened browser window.",
+        CollectionPhase.LoadingStatement => "Loading 90-day transactions from Visa Cal…",
+        CollectionPhase.ProcessingAndSaving => "Masking descriptions and writing JSON…",
+        CollectionPhase.Completed => "Statement saved locally. Switch periods above anytime.",
+        _ => string.Empty
+    };
+
+    private static string MapErrorBanner(Exception exception) => exception switch
+    {
+        OperationCanceledException => "Collection cancelled. Previous saved transactions were kept.",
+        TimeoutException => "Timed out waiting for login or transactions. Previous saved transactions were kept.",
+        InvalidOperationException { Message: CollectionFailureMessages.AlreadyRunning } => CollectionFailureMessages.AlreadyRunning,
+        InvalidOperationException { Message: CollectionFailureMessages.BrowserRequired } => CollectionFailureMessages.BrowserRequired,
+        InvalidOperationException { Message: CollectionFailureMessages.EmptyStatement } => "No transactions were returned from Visa Cal. Previous saved transactions were kept.",
+        _ => "Collection failed. Previous saved transactions were kept."
+    };
+
+    public ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        TryCancelRun();
+        return ValueTask.CompletedTask;
+    }
+}
